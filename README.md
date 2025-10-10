@@ -9,30 +9,24 @@ A simple web browser implementation in Python that supports:
 
 ## Usage
 
-```bash
-python3 browser.py <url>
+```bash python3 browser.py <url>```
 
 ## Examples
 
 Load a webpage
-```bash
-python3 browser.py https://example.org/
+```bash python3 browser.py https://example.org/```
 
 View source
-```bash
-python3 browser.py view-source:https://example.org/
+```bash python3 browser.py view-source:https://example.org/```
 
 Open local file
-```bash
-python3 browser.py file:///path/to/file.html
+```bash python3 browser.py file:///path/to/file.html```
 
 Data URL
-```bash
-python3 browser.py "data:text/html,<h1>Hello World</h1>"
+```bash python3 browser.py "data:text/html,<h1>Hello World</h1>"```
 
 ## Testing
 Run unit tests:
 
-```bash
-python3 test_browser.py -v
+```bash python3 test_browser.py -v```
 
