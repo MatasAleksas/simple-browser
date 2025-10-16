@@ -375,9 +375,9 @@ if __name__ == "__main__":
 
     # Optional: test with multiple requests to same server
     # Uncomment to test keep-alive
-    print("\n\n=== Second request (should reuse socket) ===\n")
-    url2 = URL("https://example.org/")
-    url2.load()
+    # print("\n\n=== Second request (should reuse socket) ===\n")
+    # url2 = URL("https://example.org/")
+    # url2.load()
 
     URL.close_all_sockets()
 
