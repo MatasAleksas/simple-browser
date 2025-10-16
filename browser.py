@@ -5,7 +5,20 @@ import urllib.parse
 import os
 
 class URL:
+    """A class to parse and handle URLs, including file, data, http, and https schemes."""
+    
+    # socket cache for keep-alive connections
+    socket_cache = {}
+
+    # HTTP response cache
+    http_cache = {}
+
+    # max redirects to prevent infinite loops
+    MAX_REDIRECTS = 10
+
     def __init__(self, url):
+        """Parse the given URL and initialize attributes."""
+
         self.is_file = False
         self.is_data = False
         self.is_view_source = False
@@ -108,6 +121,8 @@ class URL:
         self.path = "/" + url
 
     def decode_data_url(self, meta, payload):
+        """Decode a data URL and return the content as a string."""
+
         # decode a data url payload
         # meta: part before the comma
         # payload: part after the comma
@@ -149,18 +164,47 @@ class URL:
                 return raw.decode(charset, errors='replace')
             except Exception:
                 return raw.decode('utf-8', errors='replace')
+            
+    def get_socket(self):
+        """Get or create a socket for this host:port, with keep-alive."""
+        cache_key = (self.scheme, self.host, self.port)
 
-    def request(self):
-        # establish a socket
-        # address family is INET, tells how to find the other computer
-        # type describes the convo between the 2 computers
-        # protocol describes the steps which the 2 computers establish a connection
+        # try to use existing socket from cache
+        if cache_key in URL.socket_cache:
+            s = URL.socket_cache[cache_key]
+            # check if socket is still valid by seeing if its readable
+
+            try:
+                # peek at the socket, if theres unexpected data. connection was closed
+                s.setblocking(False)
+                data = s.recv(1, socket.MSG_PEEK)
+                s.setblocking(True)
+
+                if data == b'':
+                    # Socket is closed by server
+                    raise Exception("Socket closed")
+
+                # if it gets here and theres still data its unusal                
+            except BlockingIOError:
+                # no data available, socket is still open
+                s.setblocking(True)
+                return s
+            except Exception:
+                # some other error, close and remove from cache
+                try:
+                    s.close()
+                except Exception:
+                    pass
+                del URL.socket_cache[cache_key]
+                # fall through to create a new socket
+
+        # create a new socket
         s = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
             proto=socket.IPPROTO_TCP,
         )
-        
+
         # Connect to the host on port 80
         s.connect((self.host, self.port))
 
@@ -168,53 +212,103 @@ class URL:
         if self.scheme == "https":
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
+        
+        # cache the new socket
+        URL.socket_cache[cache_key] = s
+        return s
 
-        # now theres a connection, now we just gotta send data using the send method
-        # very important to use \r\n for new lines
-        # important to put two \r\n newlines at the end so that you send that blank line at the end
-        # if you forget, the other computer will keep waiting until you send that newline
-        request = "GET {} HTTP/1.0\r\n".format(self.path)
+    def resolve_redirect_location(self, location):
+        """Resolve a redirect location to an absolute URL."""
+        
+        # if location is a full URL, return as is
+        if "://" in location:
+            return location
+        
+        # if location starts with '/', its absolute path on the same host
+        if location.startswith("/"):
+            return f"{self.scheme}://{self.host}:{self.port}{location}"
+        
+        # otherwise its a relative path
+        base_path = self.path.rsplit("/", 1)[0]  # remove last segment
+        return f"{self.scheme}://{self.host}:{self.port}{base_path}/{location}"
+
+    def request(self, redirect_count=0):
+        """Make an HTTP request and return the response body as a string."""
+
+        if redirect_count > URL.MAX_REDIRECTS:
+            raise Exception(f"Too many redirects (limit: {URL.MAX_REDIRECTS})")
+
+        s = self.get_socket()
+
+        request = "GET {} HTTP/1.1\r\n".format(self.path)
         request += "Host: {}\r\n".format(self.host)
-        request += "Connection: close\r\n"
+        request += "Connection: keep-alive\r\n"
         request += "User-Agent: user\r\n"
         request += "\r\n"
         s.send(request.encode("utf8")) # important to send raw bits and bytes
 
-        # read server response using makefile
-        # returns a file-like object with every byte we recieve from the server
-        # we turn those bytes into a string using utf8, and informing the weird line endings
-        response = s.makefile("r", encoding="utf8", newline="\r\n")
+        # read server response in binary mode
+        response = s.makefile("rb", newline=None)
 
-        # split response into pieces, first line is the status
-        # dont check the version of http if its the same as yours since some servers are misconfigured to 1.1
-        # even when talking in 1.0
-        status_line = response.readline()
+        # read status line
+        status_line = response.readline().decode("utf8")
         version, status, explanation = status_line.split(" ", 2)
+        
+        status_code = int(status)
 
-        # after status, its the headers
-        # split each line at the first colon
-        # fill a map of header names to values
-        # headers are case-insensitive, so normalize them to lowercase
-        # and strip off any white-space 
+        # read headers
         response_headers = {}
         while True:
-            line = response.readline()
+            line = response.readline().decode("utf8")
             if line == "\r\n": break
             header, value = line.split(":", 1)
             response_headers[header.casefold()] = value.strip()
 
-        # make sure these headers are not present
+        # check for unsupported headers
         assert "transfer-encoding" not in response_headers
         assert "content-encoding" not in response_headers
 
-        # the usual way to get the sent data is everything after the headers
-        content = response.read()
-        s.close()
+        if 300 <= status_code < 400:
+            # handle redirects
+            if "location" not in response_headers:
+                raise Exception(f"Redirect status {status_code} but no Location header")
+            
+            content_length = response_headers.get("content-length")
+            if content_length:
+                # read and discard body
+                response.read(int(content_length))
+            
+            location = response_headers["location"]
 
-        # its the body were going to display so return that
-        return content
+            redirect_url_str = self.resolve_redirect_location(location)
+            redirect_url = URL(redirect_url_str)
+
+            return redirect_url.request(redirect_count + 1)
+
+        # read content based on content-length
+        content_length = response_headers.get("content-length")
+        if content_length:
+            body_bytes = response.read(int(content_length))
+        else:
+            # fallback, read all
+            body_bytes = response.read()
+            # if no content-length, we can reuse connection
+            cache_key = (self.scheme, self.host, self.port)
+
+            if cache_key in URL.socket_cache:
+                try:
+                    URL.socket_cache[cache_key].close()
+                except Exception:
+                    pass
+                del URL.socket_cache[cache_key]
+        
+        # decode body to string and dont close the socket, its cached for later use
+        body = body_bytes.decode("utf8", errors="replace")
+        return body
 
     def show(self, body):
+        """Display the body content as plain text."""
+
         # to create a very simple web browser, take the page html and print all the text, but not the tags
         # it goes through the request body char by char and checks if its between a pair of <>
         # when its not in a tag it prints the text between the tags
@@ -234,6 +328,8 @@ class URL:
         print(output, end="")
 
     def load(self):
+        """Load the URL and display its content."""
+
         # now we can load a URL and show the data
         # also a function to open and read files
 
@@ -259,10 +355,30 @@ class URL:
             print(body)  # print raw html
         else:
             self.show(body)  # print text
+    
+    @classmethod
+    def close_all_sockets(cls):
+        """Close all cached sockets."""
+        for s in cls.socket_cache.values():
+            try:
+                s.close()
+            except Exception:
+                pass
+        cls.socket_cache.clear()
 
 if __name__ == "__main__":
     import sys
-    url = URL(sys.argv[1])
-    url.load()
     
+    if len(sys.argv) > 1:
+        url = sys.argv[1]
+        url.load()
+
+    # Optional: test with multiple requests to same server
+    # Uncomment to test keep-alive
+    print("\n\n=== Second request (should reuse socket) ===\n")
+    url2 = URL("https://example.org/")
+    url2.load()
+
+    URL.close_all_sockets()
+
 

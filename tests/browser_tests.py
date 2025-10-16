@@ -1,5 +1,9 @@
 import unittest
 import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from browser import URL
 
 class URL_Test(unittest.TestCase):
